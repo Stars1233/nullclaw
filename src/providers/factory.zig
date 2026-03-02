@@ -41,6 +41,9 @@ const CompatProvider = struct {
     auth_style: compatible.AuthStyle = .bearer,
     /// Whether this provider supports native OpenAI-style tool_calls.
     native_tools: bool = true,
+    /// When set, cap max_tokens in non-streaming requests to this value.
+    /// Fireworks rejects max_tokens > 4096 when stream=false.
+    max_tokens_non_streaming: ?u32 = null,
 };
 
 const compat_providers = [_]CompatProvider{
@@ -61,8 +64,8 @@ const compat_providers = [_]CompatProvider{
     .{ .name = "vercel-ai", .url = "https://ai-gateway.vercel.sh/v1", .display = "Vercel AI Gateway" },
     .{ .name = "together", .url = "https://api.together.xyz", .display = "Together AI" },
     .{ .name = "together-ai", .url = "https://api.together.xyz", .display = "Together AI" },
-    .{ .name = "fireworks", .url = "https://api.fireworks.ai/inference/v1", .display = "Fireworks AI" },
-    .{ .name = "fireworks-ai", .url = "https://api.fireworks.ai/inference/v1", .display = "Fireworks AI" },
+    .{ .name = "fireworks", .url = "https://api.fireworks.ai/inference/v1", .display = "Fireworks AI", .max_tokens_non_streaming = 4096 },
+    .{ .name = "fireworks-ai", .url = "https://api.fireworks.ai/inference/v1", .display = "Fireworks AI", .max_tokens_non_streaming = 4096 },
     .{ .name = "huggingface", .url = "https://router.huggingface.co/v1", .display = "Hugging Face" },
     .{ .name = "aihubmix", .url = "https://aihubmix.com/v1", .display = "AIHubMix" },
     .{ .name = "siliconflow", .url = "https://api.siliconflow.cn/v1", .display = "SiliconFlow" },
@@ -308,6 +311,7 @@ pub const ProviderHolder = union(enum) {
                     if (c.no_responses_fallback) prov.supports_responses_fallback = false;
                     if (c.merge_system_into_user) prov.merge_system_into_user = true;
                     if (!c.native_tools) prov.native_tools = false;
+                    if (c.max_tokens_non_streaming) |cap| prov.max_tokens_non_streaming = cap;
                 }
 
                 // Apply config-level native_tools override (can only force to false).
@@ -501,6 +505,10 @@ test "findCompatProvider returns correct flags" {
     const minimax_cn = findCompatProvider("minimax-cn").?;
     try std.testing.expect(minimax_cn.no_responses_fallback);
     try std.testing.expect(minimax_cn.merge_system_into_user);
+
+    // Fireworks has non-streaming max_tokens cap.
+    const fireworks = findCompatProvider("fireworks").?;
+    try std.testing.expectEqual(@as(?u32, 4096), fireworks.max_tokens_non_streaming);
 }
 
 test "fromConfig applies no_responses_fallback flag" {
@@ -527,6 +535,14 @@ test "fromConfig inherits native_tools=false from table" {
     defer h.deinit();
     try std.testing.expect(h == .compatible);
     try std.testing.expect(!h.compatible.native_tools);
+}
+
+test "fromConfig applies max_tokens_non_streaming from table" {
+    const alloc = std.testing.allocator;
+    var h = ProviderHolder.fromConfig(alloc, "fireworks", "key", null, true, null);
+    defer h.deinit();
+    try std.testing.expect(h == .compatible);
+    try std.testing.expectEqual(@as(?u32, 4096), h.compatible.max_tokens_non_streaming);
 }
 
 test "detectProviderByApiKey openrouter" {

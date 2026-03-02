@@ -67,6 +67,9 @@ pub const OpenAiCompatibleProvider = struct {
     /// Whether this provider supports native OpenAI-style tool_calls.
     /// When false, the agent uses XML tool format via system prompt.
     native_tools: bool = true,
+    /// When set, cap max_tokens in non-streaming requests to this value.
+    /// Some providers (e.g. Fireworks) reject large max_tokens without streaming.
+    max_tokens_non_streaming: ?u32 = null,
     /// Optional User-Agent header for HTTP requests.
     /// When set, requests will include "User-Agent: {value}" header.
     user_agent: ?[]const u8 = null,
@@ -157,6 +160,16 @@ pub const OpenAiCompatibleProvider = struct {
             }
         }
         return model;
+    }
+
+    fn capNonStreamingMaxTokens(self: OpenAiCompatibleProvider, request: ChatRequest) ChatRequest {
+        var capped_request = request;
+        if (self.max_tokens_non_streaming) |cap| {
+            if (capped_request.max_tokens) |mt| {
+                if (mt > cap) capped_request.max_tokens = cap;
+            }
+        }
+        return capped_request;
     }
 
     /// Build a Responses API request JSON body.
@@ -575,7 +588,8 @@ pub const OpenAiCompatibleProvider = struct {
         const url = try self.chatCompletionsUrl(allocator);
         defer allocator.free(url);
 
-        const body = try buildChatRequestBody(allocator, request, effective_model, temperature, self.merge_system_into_user);
+        const capped_request = self.capNonStreamingMaxTokens(request);
+        const body = try buildChatRequestBody(allocator, capped_request, effective_model, temperature, self.merge_system_into_user);
         defer allocator.free(body);
 
         const auth = try self.authHeaderValue(allocator);
@@ -943,6 +957,36 @@ test "supportsNativeTools returns true for compatible" {
     var p = OpenAiCompatibleProvider.init(std.testing.allocator, "test", "https://example.com", "key", .bearer, null);
     const prov = p.provider();
     try std.testing.expect(prov.supportsNativeTools());
+}
+
+test "capNonStreamingMaxTokens caps request max_tokens above provider limit" {
+    const msgs = [_]root.ChatMessage{root.ChatMessage.user("hello")};
+    const req = root.ChatRequest{ .messages = &msgs, .model = "test-model", .max_tokens = 8000 };
+    var p = OpenAiCompatibleProvider.init(std.testing.allocator, "fireworks", "https://api.fireworks.ai/inference/v1", "key", .bearer, null);
+    p.max_tokens_non_streaming = 4096;
+
+    const capped = p.capNonStreamingMaxTokens(req);
+    try std.testing.expectEqual(@as(?u32, 4096), capped.max_tokens);
+    try std.testing.expectEqual(@as(?u32, 8000), req.max_tokens);
+}
+
+test "capNonStreamingMaxTokens keeps request max_tokens when already below limit" {
+    const msgs = [_]root.ChatMessage{root.ChatMessage.user("hello")};
+    const req = root.ChatRequest{ .messages = &msgs, .model = "test-model", .max_tokens = 1024 };
+    var p = OpenAiCompatibleProvider.init(std.testing.allocator, "fireworks", "https://api.fireworks.ai/inference/v1", "key", .bearer, null);
+    p.max_tokens_non_streaming = 4096;
+
+    const capped = p.capNonStreamingMaxTokens(req);
+    try std.testing.expectEqual(@as(?u32, 1024), capped.max_tokens);
+}
+
+test "capNonStreamingMaxTokens leaves request unchanged when limit is unset" {
+    const msgs = [_]root.ChatMessage{root.ChatMessage.user("hello")};
+    const req = root.ChatRequest{ .messages = &msgs, .model = "test-model", .max_tokens = 8000 };
+    const p = OpenAiCompatibleProvider.init(std.testing.allocator, "generic", "https://example.com/v1", "key", .bearer, null);
+
+    const capped = p.capNonStreamingMaxTokens(req);
+    try std.testing.expectEqual(@as(?u32, 8000), capped.max_tokens);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
